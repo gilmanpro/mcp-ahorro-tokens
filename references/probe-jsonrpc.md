@@ -4,6 +4,17 @@ Detalle técnico detrás de `scripts/probe_mcp.py` (tools/list) y
 `scripts/call_mcp.py` (tools/call). Léelo cuando alguno de los dos falle o
 cuando quieras entender por qué NO debes sondear a mano con curl/PowerShell.
 
+## Índice
+
+- [Por qué sondear en vez de activar](#por-qué-sondear-en-vez-de-activar)
+- [El problema de sondear a mano en Windows](#el-problema-de-sondear-a-mano-en-windows)
+- [Flujo remoto (Streamable HTTP) verificado](#flujo-remoto-streamable-http-verificado)
+- [Invocar una tool sin activar el MCP (tools/call) — call_mcp.py](#invocar-una-tool-sin-activar-el-mcp-toolscall--call_mcppy)
+- [Flujo local (stdio) verificado](#flujo-local-stdio-verificado)
+- [Secretos](#secretos)
+- [Exit codes](#exit-codes-probe_mcppy-call_mcppy-y-audit_mcppy)
+- [Apéndice: resources/list, prompts/list y el patrón de sesión única](#apéndice-resourceslist-promptslint-y-el-patron-de-sesion-unica)
+
 ## Por qué sondear en vez de activar
 
 Las tools de un MCP se **inyectan en el system prompt al arrancar la sesión**.

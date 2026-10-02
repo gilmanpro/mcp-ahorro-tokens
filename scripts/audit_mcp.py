@@ -20,6 +20,16 @@ audit_mcp.py hace 1 arranque y N operaciones dentro de la misma sesion:
   - Tras cada tools/list escribe la cache de schemas en
     .cache/<nombre>.json; con --from-cache responde desde ella sin arrancar el
     servidor (0 s, 0 red). --refresh refresca en vivo si falta o es vieja.
+  - --all: audita en SERIE TODOS los servidores definidos en la config
+    (1 arranque por servidor, misma logica del audit individual en bucle).
+    Por cada uno imprime el bloque compacto y escribe su cache; al final,
+    tabla resumen global (servidor | transporte | serverInfo | n° tools |
+    estado). Si un servidor falla (timeout, proceso roto) se anota FALLO y
+    CONTINUA con el siguiente (no aborta el lote). Incompatible con
+    --call/--batch. El --timeout aplica POR SERVIDADOR y por operacion: los
+    locales npx pueden tardar, se recomienda --timeout 120. Con --from-cache
+    responde al instante desde la cache los que la tengan fresca y AVISA de
+    los que no (con --refresh los sin cache fresca se auditan en vivo).
 
 Uso:
   python audit_mcp.py <nombre> [--config <ruta>] [--timeout <seg>]
@@ -27,6 +37,10 @@ Uso:
       [--no-tools] [--no-resources] [--no-prompts]
       [--call <tool> [--args-file <json> | --args <json>]]  (repetible)
       [--batch plan.json]
+      [--from-cache [--max-age <h>] [--refresh]]
+
+  python audit_mcp.py --all [--config <ruta>] [--timeout 120]
+      [--verbose] [--no-resources] [--no-prompts]
       [--from-cache [--max-age <h>] [--refresh]]
 
 Los --args-file/--args se asignan por ORDEN a los --call que no traen
@@ -37,9 +51,11 @@ soportan igual que en probe_mcp.py / call_mcp.py. Los secretos {file:...} se
 resuelven en runtime y NUNCA se imprimen.
 
 Exit codes: 0 = todo OK; 1 = algun fallo de llamada/sondeo (handshake roto,
-una tool respondio isError:true, error JSON-RPC/red/proceso); 2 = error de
+una tool respondio isError:true, error JSON-RPC/red/proceso) o, con --all,
+algun servidor fallo (el lote continua y la tabla lo muestra); 2 = error de
 config/uso (config o servidor inexistente, plan ilegible, --from-cache con
-llamadas o sin cache valida y sin --refresh).
+llamadas o sin cache valida y sin --refresh, --all con nombre o con
+--call/--batch).
 
 Solo stdlib. Protocolo: references/probe-jsonrpc.md
 """
@@ -54,6 +70,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp_common import (  # noqa: E402
     McpError,
     default_config_path,
+    find_server,
+    list_servers,
+    load_config,
     load_server_or_die,
     print_tools,
     read_cache,
@@ -79,7 +98,14 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Auditoria MCP y llamadas en lote con una sola sesion "
                     "(1 arranque, N operaciones).")
-    parser.add_argument("server", help="Nombre del servidor tal como esta definido en la config")
+    parser.add_argument("server", nargs="?",
+                        help="Nombre del servidor tal como esta definido en la config "
+                             "(obligatorio salvo con --all)")
+    parser.add_argument("--all", action="store_true", dest="all_servers",
+                        help="Auditar en serie TODOS los servidores de la config "
+                             "(1 arranque por servidor + tabla resumen global; "
+                             "incompatible con <nombre>, --call y --batch; "
+                             "recomendado --timeout 120 en locales npx)")
     parser.add_argument("--config", default=default_config_path(),
                         help="Ruta a opencode.json (por defecto: global de OpenCode)")
     parser.add_argument("--timeout", type=int, default=60,
@@ -288,17 +314,17 @@ def audit_sections(session, ns):
     return tools, resources, prompts, fallo
 
 
-def show_from_cache(ns, data):
+def show_from_cache(name, verbose, data):
     """Resumen desde la cache: mismo aspecto que la auditoria, 0 arranques."""
     info = data.get("serverInfo") or {}
     edad_h = (time.time() - float(data.get("timestamp", 0))) / 3600.0
-    print(f"[caché] '{ns.server}' leido de .cache/{ns.server}.json "
+    print(f"[caché] '{name}' leido de .cache/{name}.json "
           f"(snapshot de {edad_h:.1f} h atras; servidor NO consultado)")
     caps = ", ".join(sorted((data.get("capabilities") or {}).keys())) or "(ninguna declarada)"
     print(f"SERVER   {info.get('name', '?')} v{info.get('version', '?')}")
     print(f"CAPS     {caps}")
     tools = data.get("tools") or []
-    if ns.verbose:
+    if verbose:
         print(f"TOOLS ({len(tools)}):")
         print_tools(tools)
     else:
@@ -313,11 +339,138 @@ def show_from_cache(ns, data):
             print(f"{etiqueta} {len(valor)} — {nombres or '(ninguno)'}")
 
 
+# ----------------------------------------------------------------- --all ----
+
+ANCHO_SERVIDOR = 16
+ANCHO_INFO = 24
+ANCHO_MOTIVO = 90
+
+
+def audit_server_live(name, server, config_dir, ns):
+    """Auditoria en vivo de UN servidor (1 arranque) para el modo --all.
+
+    Reutiliza la logica del audit individual: handshake + audit_sections +
+    write_cache. Devuelve (ok, serverInfo_str, n_tools, motivo_corto).
+    Nunca lanza McpError al llamador: el fallo se anota y el lote continua.
+    """
+    t0 = time.time()
+    try:
+        with McpSession(server, config_dir, ns.timeout) as session:
+            session.start()
+            tools, resources, prompts, fallo = audit_sections(session, ns)
+            if tools is None:
+                return False, "?", 0, "tools/list fallo (handshake ok)"
+            info = session.server_info or {}
+            info_str = f"{info.get('name', '?')} v{info.get('version', '?')}"
+            path_cache = write_cache(name, session.server_info,
+                                     session.capabilities, tools,
+                                     resources, prompts)
+    except McpError as err:
+        return False, "-", 0, str(err)[:ANCHO_MOTIVO]
+    motivo = "recursos/prompts parciales" if fallo else ""
+    ok = not fallo
+    print(f"[total {time.time() - t0:.1f}s | 1 arranque]"
+          + (f" [caché: {path_cache}]" if path_cache else ""))
+    return ok, info_str, len(tools), motivo
+
+
+def show_row(name, kind, info_str, n_tools, estado):
+    """Linea de la tabla resumen global del modo --all."""
+    print(f"  {name[:ANCHO_SERVIDOR]:<{ANCHO_SERVIDOR}} {kind:<8} "
+          f"{info_str[:ANCHO_INFO]:<{ANCHO_INFO}} {n_tools:>5}  {estado}")
+
+
+def main_all(ns):
+    """Audita en serie TODOS los servidores de la config (1 arranque por
+    servidor, fallos anotados sin abortar el lote) y pinta la tabla global.
+
+    Exit 0 si todos OK, 1 si algun servidor fallo, 2 error de config/uso.
+    """
+    if not os.path.isfile(ns.config):
+        print(f"ERROR: no existe la config: {ns.config}", file=sys.stderr)
+        return 2
+    try:
+        cfg = load_config(ns.config)
+    except json.JSONDecodeError as err:
+        print(f"ERROR: la config no es JSON valido: {err}", file=sys.stderr)
+        return 2
+
+    infos = list_servers(cfg)
+    if not infos:
+        print("No hay servidores MCP definidos en la config.")
+        return 0
+
+    config_dir = os.path.dirname(os.path.abspath(ns.config))
+    names = sorted(infos)
+    any_fail = False
+    rows = []
+    for idx, name in enumerate(names, 1):
+        data, _ruta, _flag, _off = find_server(cfg, name)
+        kind, target = server_kind(data), server_target(data)
+
+        if ns.from_cache:
+            cache, motivo = read_cache(name, ns.max_age)
+            if cache is not None:
+                print(f"\n=== [{idx}/{len(names)}] {name} (desde caché, sin arrancar) ===")
+                show_from_cache(name, ns.verbose, cache)
+                n = len(cache.get("tools") or [])
+                info = cache.get("serverInfo") or {}
+                rows.append((name, kind,
+                             f"{info.get('name', '?')} v{info.get('version', '?')}",
+                             n, "OK (caché)"))
+                continue
+            if not ns.refresh:
+                print(f"\n=== [{idx}/{len(names)}] {name} ({kind}) ===")
+                print(f"AVISO: sin cache fresca usable ({motivo}); "
+                      f"se omite (quita --from-cache o anade --refresh).")
+                rows.append((name, kind, "-", 0, "SIN CACHE (omitido)"))
+                continue
+            # --refresh: cae a la auditoria en vivo para refrescar
+
+        print(f"\n=== [{idx}/{len(names)}] {name} ({kind}: {target}) "
+              f"— 1 arranque, timeout {ns.timeout}s...")
+        ok, info_str, n_tools, motivo = audit_server_live(name, data, config_dir, ns)
+        if not ok:
+            any_fail = True
+            estado = f"FALLO: {motivo or 'error de sondeo'}"[:ANCHO_MOTIVO]
+        else:
+            estado = "OK"
+        rows.append((name, kind, info_str, n_tools, estado))
+
+    print("\nRESUMEN GLOBAL (--all):")
+    print(f"  {'servidor':<{ANCHO_SERVIDOR}} {'transporte':<8} "
+          f"{'serverInfo':<{ANCHO_INFO}} tools  estado")
+    for row in rows:
+        show_row(*row)
+    n_ok = sum(1 for r in rows if r[4].startswith("OK"))
+    n_fail = sum(1 for r in rows if r[4].startswith("FALLO"))
+    n_cache = sum(1 for r in rows if r[4] == "SIN CACHE (omitido)")
+    print(f"TOTAL: {len(rows)} servidores — {n_ok} OK, {n_fail} FALLO"
+          + (f", {n_cache} sin cache" if n_cache else "") + ".")
+    return 1 if any_fail else 0
+
+
 # --------------------------------------------------------------------- main -
 
 def main(argv=None):
     salir_utf8()
     ns = parse_args(argv)
+
+    if ns.all_servers:
+        if ns.server:
+            print("ERROR: --all no acepta nombre de servidor; audita TODOS "
+                  "los de la config.", file=sys.stderr)
+            return 2
+        if ns.calls or ns.args_files or ns.args_inline or ns.batch is not None:
+            print("ERROR: --all es incompatible con --call/--args/--args-file/"
+                  "--batch (audita, no invoca).", file=sys.stderr)
+            return 2
+        return main_all(ns)
+
+    if not ns.server:
+        print("ERROR: falta el nombre del servidor (o usa --all para auditar "
+              "toda la config).", file=sys.stderr)
+        return 2
 
     if ns.from_cache and (ns.calls or ns.batch is not None):
         print("ERROR: --from-cache solo sirve para inspeccion; para INVOCAR tools "
@@ -327,7 +480,7 @@ def main(argv=None):
     if ns.from_cache:
         data, motivo = read_cache(ns.server, ns.max_age)
         if data is not None:
-            show_from_cache(ns, data)
+            show_from_cache(ns.server, ns.verbose, data)
             return 0
         if not ns.refresh:
             print(f"ERROR: {motivo}; refresca ejecutando el audit en vivo "

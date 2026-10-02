@@ -4,6 +4,14 @@ Verificado contra el binario opencode 2.x instalado en esta maquina (comandos re
 
 **Nota sobre el inventario:** el conjunto real de MCPs de cada usuario NO esta fijado en esta referencia ni en la skill; se descubre en tiempo de ejecucion (`opencode mcp list`, `toggle_mcp.py status`, o leyendo la seccion `mcp` de la config global y de proyecto). Los nombres de servidor de los ejemplos siguientes son solo ilustrativos de la sintaxis.
 
+## Índice
+
+- [Los dos formatos que acepta el binario (probados)](#los-dos-formatos-que-acepta-el-binario-probados)
+- [Ubicaciones de config](#ubicaciones-de-config)
+- [CLI `opencode mcp`](#cli-opencode-mcp-verificado-con---help)
+- [Efecto de los cambios](#efecto-de-los-cambios)
+- [Ocultar tools sin apagar el servidor](#ocultar-tools-sin-apagar-el-servidor)
+
 ## Los dos formatos que acepta el binario (probados)
 
 Ambos se pueden usar; `opencode mcp list` los muestra. Usa SIEMPRE el formato que ya tenga el archivo que editas — no mezcles ni migres el formato por el camino.
@@ -106,4 +114,17 @@ En `opencode.json` (ejemplo ilustrativo con un servidor cualquiera del inventari
 }
 ```
 
-El patron `<servidor>_*` deshabilita las tools de ese MCP en el prompt mientras el servidor sigue definido. Apagar (`disabled`/`enabled:false`) es mas radical: ni se conecta. Usa ocultar solo si otra integracion necesita el servidor vivo.
+El patron `<servidor>_*` deshabilita las tools de ese MCP en el prompt mientras el servidor sigue definido. Para dejar visibles solo 2-3 tools concretas, oculta todas con el patron y whitelistealas despues (la excepcion `true` gana sobre el `false` del patron):
+
+```json
+"mcp": { "servers": { "resend": { "disabled": false } } },
+"tools": {
+  "resend_*": false,
+  "resend_send-email": true,
+  "resend_list-domains": true
+}
+```
+
+Con un servidor de 106 tools (resend) esto deja de inyectar decenas de miles de tokens por mensaje a pagar solo las 2 tools whitelisteadas, y el servidor queda vivo para otras integraciones.
+
+Apagar (`disabled`/`enabled:false`) es mas radical: ni se conecta. Usa ocultar solo si otra integracion necesita el servidor vivo.

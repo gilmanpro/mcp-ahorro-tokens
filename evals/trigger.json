@@ -1,0 +1,22 @@
+[
+  {"query": "enviame un correo con resend sin activar nada", "should_trigger": true},
+  {"query": "que tools tiene el mcp de wsl-port? no lo enciendas solo dime", "should_trigger": true},
+  {"query": "audita todos los mcp que tengo configurados y me das una tabla resumen con serverInfo y nº de tools", "should_trigger": true},
+  {"query": "apaga todos los mcp al instante que me estan comiendo contexto", "should_trigger": true},
+  {"query": "cuanto me cuesta tener el mcp de playwright conectado todo el dia en tokens", "should_trigger": true},
+  {"query": "prueba todas las tools del mcp resend y dime cuales fallan, sin reiniciar la sesion", "should_trigger": true},
+  {"query": "necesito resolver 4 librerias con el mcp de context7, hazme las 4 llamadas de una sin encenderlo", "should_trigger": true},
+  {"query": "enciende el mcp de resend que voy a estar usando sus tools un rato largo", "should_trigger": true},
+  {"query": "cuando termines de crear el registro en wsl-port apaga el mcp para no gastar tokens y me avisas", "should_trigger": true},
+  {"query": "lee los schemas del cache de context7 y dime la tool de docs, no me relances el npx que tarda 20 s", "should_trigger": true},
+  {"query": "crea un servidor mcp en python que exponga mi api de facturacion como tools, con transporte stdio", "should_trigger": false},
+  {"query": "automatiza el navegador con playwright cli para llenar el formulario de contacto y toma un screenshot", "should_trigger": false},
+  {"query": "transcribe esta grabacion mp3 de la reunion de manana y pasame el texto con timestamps", "should_trigger": false},
+  {"query": "anade un mcp nuevo al opencode.json del proyecto con su url y sus headers de autorizacion", "should_trigger": false},
+  {"query": "genera el README.md del paquete mcp que acabo de escribir, con secciones de instalacion y ejemplos", "should_trigger": false},
+  {"query": "que endpoints tiene la api rest de resend en su documentacion oficial para enviar correos", "should_trigger": false},
+  {"query": "configura los permisos del agente orquestador para que no pueda usar bash ni editar archivos", "should_trigger": false},
+  {"query": "cuantos tokens estoy consumiendo al mes con mi plan de suscripcion de ia, quiero revisar la factura", "should_trigger": false},
+  {"query": "monta un rate limiting en los endpoints de mi api express y revisa los headers de seguridad", "should_trigger": false},
+  {"query": "despliega el servidor mcp de chromium en docker con nginx de reverse proxy y https en el vps", "should_trigger": false}
+]

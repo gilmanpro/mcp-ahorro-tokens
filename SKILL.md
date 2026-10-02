@@ -1,6 +1,6 @@
 ---
 name: mcp-ahorro-tokens
-description: "Activar y desactivar MCPs de OpenCode bajo demanda para ahorrar tokens: un MCP conectado inyecta sus tools en cada mensaje y solo funciona al arrancar la sesion. Enciende solo lo pedido; descubre con opencode mcp list. Para INSPECCIONAR sin activar: probe_mcp.py. Para ACCION PUNTUAL sin activar ni reiniciar: tools/call de call_mcp.py, coste cero de prompt. Para AUDITAR un MCP, PROBAR TODAS SUS TOOLS o hacer VARIAS LLAMADAS/LOTE al mismo servidor: audit_mcp.py (1 arranque, N operaciones; el npx local tarda 15-20 s por relanzamiento). Schemas ya sondeados: --from-cache, 0 s 0 red. Usar SIEMPRE que el usuario pida activar, apagar, usar o auditar un MCP, o pregunte que tools tiene, y AL TERMINAR una tarea que uso un MCP para desactivarlo y avisar. Cubre toggle/probe/call/audit_mcp.py, cache, whitelist y aviso de reinicio. Regla de oro: inspeccionar sondeando, auditoria y lote en una sola sesion con audit_mcp.py, accion puntual tools/call, encender solo lo pedido, apagar al acabar, nunca apagar los permanentes."
+description: "Activa y desactiva servidores MCP de OpenCode bajo demanda para ahorrar tokens: un MCP conectado inyecta los schemas de sus tools en cada mensaje aunque no se usen. Al cargar la skill, off --all los apaga todos (--except protege los permanentes); enciende solo lo pedido y apaga al terminar avisando. Inspeccionar sin activar: probe_mcp.py (schemas ya sondeados: --from-cache, 0 s sin red); accion puntual sin activar ni reiniciar: tools/call de call_mcp.py; auditar, probar todas las tools o llamar en lote en una sola sesion: audit_mcp.py (--all recorre todo el inventario). Usar SIEMPRE que el usuario pida activar, apagar, conectar o usar un MCP, apagarlos todos, pregunte que tools tiene o cuanto cuesta tenerlo conectado, quiera auditar o probar todas sus tools, hacer varias llamadas o un lote, leer schemas de la cache o ahorrar tokens, y al terminar cualquier tarea que uso un MCP para desactivarlo, aunque no mencione la skill. NO usar para crear un servidor MCP (usa mcp-builder)."
 license: MIT
 compatibility: opencode
 metadata:
@@ -10,92 +10,90 @@ metadata:
 
 # MCP a demanda — ahorro de tokens
 
-Cada servidor MCP **conectado** añade sus tools (con nombres, descripciones y schemas completos) al prompt de sistema del agente **en cada mensaje**. Un MCP con 40 tools puede costar varios miles de tokens por turno, aunque la conversacion no lo use. Por eso: los MCPs se encienden para la tarea que los necesita y se apagan cuando termina.
+Cada servidor MCP **conectado** añade los nombres, descripciones y schemas completos de sus tools al prompt del agente **en cada mensaje**, aunque la conversacion nunca las use: un servidor de 106 tools (resend) inyectaria decenas de miles de tokens por turno. Principio: encender solo lo que la tarea necesita, apagar cuando termina y, siempre que se pueda, usar el servidor **sin encenderlo**.
 
-## Arbol de decision
+Todos los comandos suponen cwd la carpeta de esta skill (`~\.agents\skills\mcp-ahorro-tokens`); desde otro cwd, antepon la ruta completa a `scripts\...`.
 
-**Esta skill es agnostica del inventario**: NO asuma que existen MCPs concretos (ni resend, ni wsl-port, ni ningun otro). El conjunto de servidores disponibles se **descubre en tiempo de ejecucion** con cualquiera de estos metodos:
+## Accion al iniciar la skill
 
-- `opencode mcp list` (muestra `connected`, `disabled` o `failed` por servidor).
-- Leyendo la seccion `mcp` de `~/.config/opencode/opencode.json` (global) y del `opencode.json` del proyecto.
-- `python scripts/toggle_mcp.py status` (lista los definidos en la config con su estado).
-
-1. **¿Es una pregunta INFORMATIVA sobre un MCP?** ("¿que tools tiene X?", "¿cuantas tools me costaria activarlo?", "¿existe la tool Y?") → **NO actives nada**: sondealo con `python scripts/probe_mcp.py <nombre>` (vease la seccion Inspeccionar). **Si ya lo sondeaste hace poco, no lo relances**: `python scripts/probe_mcp.py <nombre> --from-cache` responde desde la cache local (0 s, 0 red, 0 tokens de arranque; >24 h de antiguedad → refresca con `--refresh` o quita el flag). Activar solo se justifica si el usuario va a **USAR** las tools de forma interactiva y repetida.
-2. **¿El usuario pide una ACCION PUNTUAL con un MCP?** ("enviame un correo", "creame ese registro" — una o pocas llamadas, y no necesitas sus tools durante toda la sesion) → **NO lo actives**: invoca la tool directamente con `python scripts/call_mcp.py <nombre> <tool> --args-file ...` (tools/call por JSON-RPC: coste cero de prompt, sin reinicio de sesion). Vease la seccion "Usar un MCP sin activarlo".
-3. **¿VARIAS llamadas al mismo MCP o AUDITORIA completa?** ("audita el MCP X", "prueba todas sus tools", "necesito 3-4 datos de resend") → **`python scripts/audit_mcp.py <nombre>`**: hace **1 solo arranque y N operaciones** en la misma sesion (handshake + serverInfo + capabilities + tools/resources/prompts + lote de `tools/call`). Encadenar `call_mcp.py` pagaria el relanzamiento del servidor **por llamada** (~15-20 s en locales `npx`). Vease la seccion "Auditar y llamar en lote".
-4. **¿El usuario pidio un MCP EXPLICITAMENTE para uso interactivo?** Solo dos casos validos:
-   - **Nombra el MCP** ("usa resend", "conecta el MCP de WSL") → ese es el candidato.
-   - **La tarea es inequivocamente de un MCP concreto** y exige varias llamadas encadenadas o exploracion de tools en la sesion → busca en el inventario descubierto el servidor que encaje, por su nombre o por las tools que expone.
-   - Si el usuario no pidio ningun MCP, **no enciendas nada**: la mayoria de tareas se resuelven con skills, CLIs y herramientas normales, sin coste de MCP.
-5. **¿Ningun MCP del inventario encaja con lo pedido?** Informa al usuario ("no hay ningun MCP configurado para X; puedes anadirlo con `opencode mcp add`") en vez de encender uno parecido o improvisar. Nunca enciendas un MCP "que podria servir".
-6. **¿El MCP elegido esta ya activo?** Comprueba con `opencode mcp list`.
-7. **Si esta apagado y lo necesitas de forma interactiva:** activalo (ver Como activar/desactivar), AVISA al usuario de que lo activaste **y de que sus tools no estaran disponibles en esta sesion hasta reiniciarla** (se inyectan al arrancar), y haz la tarea (en sesion nueva, o con lo que la sesion actual permita). Para una sola accion puntual recuerda la via 2: `call_mcp.py`, sin activar ni reiniciar; para varias, la via 3: `audit_mcp.py`.
-8. **Al terminar la tarea:** desactivalo, y explica al usuario en el reporte: "Se desactivo el MCP X para ahorrar tokens; dime si quieres dejarlo permanente."
-9. **Excepcion permanente:** si el usuario marco un MCP como permanente ("dejalo siempre encendido"), no lo apagues sin pedir permiso. Registra esa preferencia durante la sesion.
-
-## Inspeccionar las tools de un MCP (sin activarlo)
-
-Preguntarle al servidor directamente por JSON-RPC deja el inventario intacto y no gasta un solo token de activacion:
+Lo primero al cargar esta skill, antes de cualquier otra decision, es apagar todos los MCPs para que la sesion arranque a coste cero:
 
 ```bat
-python scripts\probe_mcp.py <nombre> [--config <ruta>] [--timeout <seg>] [--from-cache]
+python scripts\toggle_mcp.py off --all
 ```
 
-- Lista nombre + descripcion de cada tool y el TOTAL, tanto para servidores **remotos** (handshake Streamable HTTP: initialize → initialized → tools/list; tolera SSE y servidores stateless sin `Mcp-Session-Id`) como **locales** (lanza el `command` por stdio newline-delimited y lo mata al terminar; `npx -y` en la primera ejecucion puede tardar: sube `--timeout` a 90 o mas).
-- Cada sondio en vivo **escribe la cache de schemas** en `.cache\<nombre>.json` (serverInfo, capabilities, tools con inputSchema, timestamp). Con `--from-cache` la respuesta sale del disco **sin arrancar el servidor** (0 s, 0 red); si la cache no existe o supera `--max-age` horas (defecto 24) avisa y sale con 2 — refresca con `--refresh` o sin el flag.
-- ¿Auditoria completa o ademas alguna llamada? Usa `audit_mcp.py` (seccion "Auditar y llamar en lote"): misma cache, 1 arranque, N operaciones.
-- Resuelve las referencias `{file:./.secrets/...}` de secretos **en runtime y nunca las imprime**.
-- Exit code: 0 listo, 1 fallo de sondio, 2 error de config/servidor inexistente o `--from-cache` sin cache valida (sin `--refresh`).
-- **Si despues el usuario quiere USAR esas tools:** distingue el tipo de uso.
-  - **Uso puntual** (una o pocas llamadas, p. ej. enviar un correo) → `call_mcp.py` (ver siguiente seccion): sin activar, sin reiniciar, sin coste de prompt.
-  - **Uso interactivo repetido** en la sesion (el agente va a llamar muchas tools del MCP una y otra vez) → `toggle_mcp.py on <nombre>` + recordarle que en la sesion actual no estaran disponibles hasta reiniciar (o abrir sesion nueva).
+Es idempotente (los ya apagados se reportan pero no se tocan) e imprime un resumen por servidor. Informa al usuario en una linea ("Se han apagado los MCPs X/Y al iniciar para ahorrar tokens; dime si quieres dejar alguno permanente"). Si ya indico MCPs permanentes: `python scripts\toggle_mcp.py off --all --except nombre1,nombre2`.
 
-Detalle del protocolo y por que NO se debe sondear a mano con curl/PowerShell en Windows: lee `references/probe-jsonrpc.md`.
+## Arbol de decision — una herramienta por necesidad
 
-## Usar un MCP sin activarlo (tools/call directo)
+La skill es agnostica del inventario: no asuma que existe ningun MCP. Se descubre en tiempo de ejecucion con `opencode mcp list` (estados `connected` / `disabled` / `failed`), con `python scripts\toggle_mcp.py status` o leyendo la seccion `mcp` de `~/.config/opencode/opencode.json` y del `opencode.json` del proyecto.
 
-Hermano de probe_mcp.py que da un paso mas: tras el handshake hace `tools/call` de UNA tool y muestra su resultado, sin tocar la config ni gastar tokens de prompt:
+| Necesidad | Valor por defecto | Salida si no encaja |
+|---|---|---|
+| Pregunta informativa ("que tools tiene?", "cuanto costaria activarlo?", "existe la tool Y?") | `python scripts\probe_mcp.py <nombre>` — no toca la config. Si ya lo sondeaste hace poco: `--from-cache` (0 s, 0 red) | Si despues hay que usar las tools: fila "uso interactivo" |
+| Accion puntual (enviar un correo, crear un registro: una o pocas llamadas, sin necesitar las tools en el prompt) | `python scripts\call_mcp.py <nombre> <tool> --args-file payload.json --timeout 90` | Si seran varias llamadas al mismo servidor: fila "auditoria o lote" |
+| Auditoria, probar todas las tools, varias llamadas o lote al mismo MCP | `python scripts\audit_mcp.py <nombre>` (1 arranque, N operaciones). Re-auditar todo el inventario: `--all --timeout 120` | Leer los schemas del ultimo snapshot sin tocar el servidor: `--from-cache` |
+| Uso interactivo repetido pedido explicitamente ("usa resend", "conecta el MCP de WSL") | `python scripts\toggle_mcp.py on <nombre>` + avisar de que las tools llegan al reiniciar la sesion | Si no quiere reiniciar: haz la tarea con `call_mcp.py` (1 llamada) o `audit_mcp.py` (lote) sin activar |
+| Ningun MCP del inventario encaja | Informa: no hay servidor configurado para X; puede anadirse con `opencode mcp add` | No enciendas uno "que podria servir" |
+
+Si el usuario no pidio ningun MCP, no enciendas nada: la mayoria de tareas se resuelven con skills, CLIs y herramientas normales.
+
+## Al terminar la tarea
+
+- `python scripts\toggle_mcp.py off <nombre>` y refleja el cambio en la respuesta final: "Se desactivo el MCP X para ahorrar tokens; dime si quieres dejarlo permanente".
+- Excepcion: un MCP que el usuario marco como permanente no se apaga sin pedir permiso; registra esa preferencia durante la sesion.
+- Si la sesion va a encadenar varias tareas con el mismo MCP en los proximos minutos, apaga al cerrar el lote de trabajo, no entre tarea y tarea.
+- Verifica el estado resultante con `opencode mcp list`.
+
+## probe_mcp.py — inspeccionar sin activar
 
 ```bat
-:: Listar tools (equivalente a probe_mcp.py, comodo desde el mismo script)
-python scripts\call_mcp.py <nombre> --list --timeout 90
-python scripts\call_mcp.py <nombre> --list --from-cache   :: sin arrancar el servidor
+python scripts\probe_mcp.py <nombre> [--config <ruta>] [--timeout <seg>] [--from-cache] [--refresh]
+```
 
-:: Invocar una tool: los argumentos SIEMPRE por archivo UTF-8 (quoting inline
-:: en cmd/PowerShell corrompe el JSON)
+- Lista nombre + descripcion de cada tool y el total, en remotos (Streamable HTTP: tolera SSE y servidores stateless sin `Mcp-Session-Id`) y locales (stdio; el primer `npx -y` descarga el paquete: sube `--timeout` a 90 o mas).
+- Cada sondio en vivo escribe la cache de schemas `.cache\<nombre>.json` (serverInfo, capabilities, tools con inputSchema, timestamp). `--from-cache` responde desde el disco sin arrancar el servidor; si la cache falta o supera `--max-age` horas (defecto 24) avisa y sale con 2: refresca con `--refresh` o quita el flag.
+- Resuelve las referencias de secretos `{file:./.secrets/...}` en runtime y nunca las imprime. Exit codes: 0 listo, 1 fallo de sondio, 2 error de config, servidor inexistente o cache invalida.
+
+## call_mcp.py — accion puntual sin activar ni reiniciar
+
+```bat
+python scripts\call_mcp.py <nombre> --list --timeout 90
 python scripts\call_mcp.py <nombre> <tool> --args-file payload.json --timeout 90
 ```
 
-- **Cuando conviene:** acciones puntuales (enviar un correo, crear un registro, listar dominios) donde NO necesitas las tools del MCP declaradas en tu prompt durante toda la sesion. Ideal para servidores con decenas o cientos de tools (activarlos pagaria decenas de miles de tokens por mensaje).
-- **Limite: UNA llamada por ejecucion.** Cada ejecucion repite el handshake y, en servidores locales, **relanza el proceso completo (~15-20 s con `npx`)**; el servidor ademas no "recuerda" nada entre llamadas. Si necesitas **varias llamadas al mismo MCP o auditarlo**, NO encadenes este script: usa `audit_mcp.py` (1 arranque, N operaciones). Debes conocer o consultar antes el schema de la tool (`--list --from-cache` si ya lo sondeaste, y `references/probe-jsonrpc.md` para el schema completo), y el servidor debe estar **definido en la config** (aunque este `disabled`) para que el script resuelva su `command`/`url` y secretos.
-- Valida la tool contra `tools/list` antes de llamarla: si no existe, imprime la lista completa y sale con 2. JSON de argumentos invalido → 2; fallo de red/proceso o `isError:true` de la tool → 1; exito → 0.
-- Nunca imprimas los argumentos ni los secretos resueltos; solo el resultado de la tool.
+- Los argumentos SIEMPRE por archivo UTF-8 (`payload.json`): el quoting inline en cmd/PowerShell corrompe el JSON. Ejemplo real para `resend` / `send-email`:
 
-## Auditar y llamar en lote (sesion unica) — audit_mcp.py
-
-`probe_mcp.py` y `call_mcp.py` relanzan el servidor en CADA ejecucion: en locales `npx` son ~15-20 s de arranque por llamada, y cada listado reimprime todas las tools (resend: 106 tools → miles de tokens en tu contexto). `audit_mcp.py` hace **1 arranque y N operaciones** en una sola sesion y su salida es **compacta por defecto** (numero de tools y nombres; descripciones solo con `--verbose`).
-
-```bat
-:: Auditoria completa: handshake + serverInfo + capabilities + tools/list +
-:: resources/list + prompts/list (lo no soportado se marca -32601 sin fallar)
-:: y escribe la cache .cache\<nombre>.json
-python scripts\audit_mcp.py resend --timeout 120
-
-:: Varias llamadas en UN solo arranque: --call es repetible, cada --args-file
-:: se asigna por orden al --call que no trae argumentos
-python scripts\audit_mcp.py context7 --calls-only ^
-  --call resolve-library-id --args-file p1.json ^
-  --call resolve-library-id --args-file p2.json
-
-:: Lote desde un plan JSON (misma sesion, tabla OK/ERROR con outputs truncados
-:: a --max-output lineas)
-python scripts\audit_mcp.py context7 --batch plan.json --calls-only --max-output 8
-
-:: Ver el ultimo snapshot sin arrancar el servidor (0 s, 0 red)
-python scripts\audit_mcp.py resend --from-cache
+```json
+{"to": "cliente@ejemplo.com", "from": "no-reply@tudominio.com", "subject": "Aviso", "text": "Cuerpo del mensaje"}
 ```
 
-Plan de ejemplo `plan.json` (lista de llamadas; `args` inline o `args_file` relativo al plan):
+- **Una llamada por ejecucion**: cada una repite el handshake y, en locales, relanza el proceso completo (~15-20 s con `npx`); el servidor no recuerda nada entre llamadas. Si necesitas varias, pasa a `audit_mcp.py`.
+- Valida la tool contra `tools/list` antes de llamarla (si no existe, imprime la lista y sale con 2); JSON de argumentos roto → 2; fallo de red/proceso o `isError: true` de la tool → 1; exito → 0.
+- Debes conocer el schema de la tool (`--list --from-cache` si ya la sondeaste) y el servidor debe estar **definido** en la config (aunque este `disabled`) para que el script resuelva su `command`/`url` y secretos.
+
+## audit_mcp.py — auditoria y lote en una sola sesion
+
+`probe_mcp.py` y `call_mcp.py` relanzan el servidor en cada ejecucion y reimprimen el catalogo; `audit_mcp.py` hace **1 arranque y N operaciones** con salida compacta por defecto (numero de tools y nombres; descripciones solo con `--verbose`). La auditoria que lo motivo: 5 servidores (2 remotos HTTP/SSE, 3 locales `npx`), 203 tools; el coste de arranque paso de ~15-20 s por operacion a uno solo por servidor.
+
+```bat
+:: Auditoria completa: handshake + serverInfo + capabilities + tools/resources/
+:: prompts (lo no soportado se marca -32601 sin fallar) y escribe la cache
+python scripts\audit_mcp.py resend --timeout 120
+
+:: Varias llamadas en UN arranque: --call es repetible; cada --args-file se
+:: asigna por orden al --call que no trae argumentos
+python scripts\audit_mcp.py context7 --calls-only --call resolve-library-id --args-file p1.json --call resolve-library-id --args-file p2.json
+
+:: Lote desde un plan JSON (tabla OK/ERROR, outputs truncados a --max-output lineas)
+python scripts\audit_mcp.py context7 --batch plan.json --calls-only --max-output 8
+
+:: Ultimo snapshot sin arrancar el servidor; --all audita TODO el inventario
+python scripts\audit_mcp.py resend --from-cache
+python scripts\audit_mcp.py --all --timeout 120
+```
+
+Plan `plan.json` (lista de llamadas; `args` inline o `args_file` relativo al plan):
 
 ```json
 [
@@ -104,106 +102,40 @@ Plan de ejemplo `plan.json` (lista de llamadas; `args` inline o `args_file` rela
 ]
 ```
 
-- **Remotos y locales** se soportan igual que probe/call (Streamable HTTP con SSE/stateless; stdio newline-delimited matando el proceso al cerrar). Secretos `{file:...}` resueltos en runtime, nunca impresos.
-- Flags para saltarse secciones: `--calls-only` (solo llamadas), `--no-tools`, `--no-resources`, `--no-prompts`; `--refresh` si `--from-cache` encuentra la cache vieja (> `--max-age` horas, defecto 24).
-- Salida por defecto sin `--verbose`: `SERVER / CAPS / TOOLS N — nombres / RESOURCES / PROMPTS / CALLS:` una linea por llamada (`OK tool — preview` o `ERROR tool — motivo corto`). `--from-cache` NO puede combinarse con `--call`/`--batch` (invocar exige hablar con el servidor).
-- Exit codes: 0 todo OK; 1 algun fallo de llamada/sondeo (`isError:true`, tool inexistente, red/proceso — lo "no soportado" NO es fallo); 2 error de config/uso.
-- La auditoria real que motivo este script: 5 servidores (2 remotos HTTP/SSE, 3 locales npx stdio), 203 tools; con sesiones unicas por servidor el coste de arranque paso de ~15-20 s por operacion a **uno solo por servidor**.
+- Flags para saltarse secciones: `--calls-only`, `--no-tools`, `--no-resources`, `--no-prompts`; `--refresh` si `--from-cache` encuentra la cache vieja. `--from-cache` y `--all` no se combinan con `--call`/`--batch` (invocar exige hablar con el servidor; `--all` recorre el inventario el solo).
+- `--timeout` aplica POR SERVIDOR en `--all`: los locales `npx` tardan, usa 120. Un servidor que falla se anota FALLO y el lote continua.
+- Exit codes: 0 todo OK; 1 algun fallo de llamada/sondeo (`isError: true`, tool inexistente, red/proceso — lo "no soportado" no es fallo); 2 error de config/uso. Con `--all`: 1 si algun servidor fallo, 2 si `--all` lleva `--call`/`--batch` o nombre de servidor.
 
-## Lecciones de una sesion real (resend / send-email)
-
-- **El schema publicado puede omitir parametros requeridos:** `send-email` no listaba `from` en su schema y el servidor respondio `from: expected string, received undefined`. Solucion: sondear tools de **solo lectura** relacionadas (p. ej. `list-domains`) para descubrir los valores validos (el unico dominio verificado) y reintentar. El intento fallido por validacion **NO llego a la API**: no hay riesgo de duplicados al reintentar.
-- **Servidores gigantes:** resend expone 106 tools; activarlo inyectaria decenas de miles de tokens por mensaje. Para una accion puntual, `call_mcp.py`; para varias, `audit_mcp.py --batch` (un solo arranque); si necesitas varias tools a menudo, conecta el servidor y oculta todo menos un whitelist (ver Alternativa en Como activar/desactivar).
-
-## Como activar / desactivar
-
-El metodo verificado contra el binario instalado (opencode 2.x) es editar la configuracion `~/.config/opencode/opencode.json`. El binario acepta **dos sintaxis** (usa la que ya tenga el archivo del usuario):
-
-- Formato anidado (el del opencode.json global de esta maquina): clave `mcp.servers.<nombre>` con flag `disabled` (`true` = apagado).
-- Formato plano (doc oficial estable): clave `mcp.<nombre>` con flag `enabled` (`false` = apagado; por defecto es `true`).
-
-Sintaxis completa, ejemplos y el CLI `opencode mcp`: lee `references/sintaxis-opencode-mcp.md` ANTES de editar la config si no la recuerdas. No leas ese archivo para tareas que solo usan `opencode mcp list`.
-
-**Recomendado — usa el script** (edita el JSON sin romper estructura ni resolver secretos):
+## toggle_mcp.py — activar, desactivar y whitelist
 
 ```bat
-:: Estado actual de TODOS los servidores definidos (descubre el inventario aqui)
 python scripts\toggle_mcp.py status
-
-:: Apagar un servidor tras terminar su tarea (escribe disabled: true)
-python scripts\toggle_mcp.py off <nombre>
-
-:: Encender un servidor explicitamente pedido por el usuario
 python scripts\toggle_mcp.py on <nombre>
+python scripts\toggle_mcp.py off <nombre>
 ```
 
-Ruta del script dentro de esta skill: `scripts/toggle_mcp.py` (por defecto opera sobre `~/.config/opencode/opencode.json`; usa `--config` para otro archivo). Despues de cualquier cambio, **verifica** con `opencode mcp list`.
+Por defecto opera sobre `~/.config/opencode/opencode.json` (`--config` para otro archivo) y luego verifica con `opencode mcp list`. El binario acepta dos formatos de config: anidado (`mcp.servers.<nombre>` + `disabled`) y plano oficial (`mcp.<nombre>` + `enabled`). Lee `references/sintaxis-opencode-mcp.md` ANTES de editar la config a mano.
 
-**Alternativa intermedia para un MCP con MUCHAS tools que quieres tener conectadas sin pagarlas en el prompt**: ocultarlas todas con un patron y **whitelistear explicitamente** solo las 2-3 que usas, en opencode.json:
-
-```json
-"mcp": { "servers": { "resend": { "disabled": false } } },
-"tools": {
-  "resend_*": false,
-  "resend_send-email": true,
-  "resend_list-domains": true
-}
-```
-
-Con un servidor de 106 tools (resend) esto deja de inyectar decenas de miles de tokens por mensaje a pagar solo las 2 tools whitelisteadas, y el servidor queda vivo para otras integraciones. Orden de preferencia: **apagar** ahorra mas (ni siquiera se conecta) → **accion puntual unica**: `call_mcp.py` sin tocar nada → **uso repetido de 2-3 tools**: patron `_*: false` + whitelist → **uso intensivo de muchas tools**: activar el servidor entero.
-
-## Regla de oro (flujo completo)
-
-```
-inspeccionar (¿que tools tiene?) → probe_mcp.py → responder — sin tocar la config
-  ¿ya lo sondeaste hace poco? → probe_mcp.py <nombre> --from-cache (0 s, 0 red)
-
-accion puntual (enviar un correo, UNA llamada) → call_mcp.py <nombre> <tool>
---args-file payload.json → reportar resultado — sin activar, sin reiniciar
-
-auditoria o VARIAS llamadas/LOTE al mismo MCP → audit_mcp.py <nombre>
-(--batch plan.json o --call repetido) → 1 arranque, N operaciones → tabla compacta
-
-uso interactivo repetido: detectar necesidad → opencode mcp list → toggle on
-(avisar + tools llegan en sesion nueva/reinicio) → hacer la tarea
-→ toggle off (avisar + explicar ahorro de tokens) → verificar con opencode mcp list
-```
-
-- Si el usuario encendio un MCP el mismo y pide "apagalo al terminar", cumplelo en la misma respuesta final.
-- Si la sesion va a seguir usando el MCP en los proximos minutos (varias tareas seguidas), mantenlo encendido y apaga al cerrar el lote de trabajo, no entre cada tarea.
-- Reporta SIEMPRE el cambio de estado en tu respuesta: "MCP <nombre> activado para la tarea / desactivado al terminar para ahorrar tokens".
+Alternativa intermedia para un servidor con muchas tools que quieres conectado sin pagarlas en el prompt: oculta todas con el patron `"<servidor>_*": false` en `"tools"` de opencode.json y whitelistea solo las 2-3 que usas (ejemplo JSON en la referencia). Orden de preferencia: apagar (ni se conecta) → accion puntual `call_mcp.py` → uso repetido de 2-3 tools (whitelist) → uso intensivo de muchas tools (activar el servidor entero).
 
 ## Anti-patrones
 
-- **Encadenar varios `call_mcp.py` contra un MCP local `npx`**: cada ejecucion relanza el servidor y paga ~15-20 s de arranque POR LLAMADA. Usa `audit_mcp.py --batch plan.json` (o `--call` repetido): **1 solo arranque, N llamadas** en la misma sesion.
-- **Volver a sondear en vivo lo que ya esta en la cache**: tras un probe/audit, los schemas quedan en `.cache\<nombre>.json`; relanzar el servidor para ver lo mismo gasta 15-20 s (local) o red inutilmente. Usa `--from-cache` (y recuerda `--max-age`/`--refresh` si necesitas datos frescos).
-- **Imprimir todas las tools sin necesidad**: `--list` de un servidor de 106 tools (resend) vuelca miles de tokens en el contexto. Usa la salida compacta de `audit_mcp.py` (numero + nombres) o `--from-cache`, y `--verbose` solo cuando haga falta el detalle.
-- **Dejar MCPs encendidos "por si acaso"**: cada mensaje posterior paga los tokens de sus tools. Apaga al terminar.
-- **Sondear con PowerShell/curl inline y JSON entrecomillado a mano**: PS 5.1 corrompe las comillas del payload ("JSON invalido") y `Invoke-WebRequest` falla por TLS (.NET viejo) aunque curl funcione. Usa siempre `probe_mcp.py`.
-- **Imprimir secretos "para depurar"**: los valores de `{file:./.secrets/...}` se resuelven en runtime; nunca los muestres en la conversacion ni en logs.
-- **Activar un MCP solo para responder "¿que tools tiene?"**: es una pregunta informativa → `probe_mcp.py`, sin tocar la config.
-- **Activar un MCP (y pagar sus tools en cada mensaje + reiniciar sesion) para una sola llamada puntual**: usa `call_mcp.py <nombre> <tool> --args-file ...` — coste cero de prompt.
-- **Confiar ciegamente en el schema publicado**: puede omitir parametros requeridos (leccion real: `send-email` sin `from`). Ante un error de validacion, consulta tools de solo lectura relacionadas para descubrir el valor valido y reintenta.
-- **Apagar en medio de una tarea** (entre tool calls): la sesion puede depender de la conexion; apaga solo al entregar el resultado.
-- **Apagar sin avisar o sin confirmar lo "permanente"**: el usuario puede estar esperando que el MCP siga disponible. Pregunta una vez y respeta la respuesta.
-- **Reformatear la config entera**: no cambies el formato que usa el archivo del usuario (anidado vs plano); edita solo el flag del servidor.
-- **Poner `disabled: true` y `enabled: false` a la vez**: usa el flag que corresponda al formato del bloque.
-- **Asumir que un servidor no existe porque no aparece en `opencode mcp list`**: list solo muestra los definidos en la config; puede haber config de proyecto que anada otros.
-- **Manipular secretos**: los tokens van en `{file:./.secrets/...}` (referencias que los scripts preservan y resuelven solo en runtime). Nunca copies el valor de un secreto a la config, a un comando ni a la conversacion — tampoco al imprimir el resultado de un sondio.
+- Empezar una tarea con MCPs encendidos que nadie pidio: cada mensaje posterior paga sus tools; `off --all` al cargar la skill garantiza coste cero y `--except` protege los permanentes.
+- Encadenar varios `call_mcp.py` contra un MCP local `npx`: cada ejecucion relanza el servidor y paga ~15-20 s por llamada; `audit_mcp.py --batch plan.json` (o `--call` repetido) hace 1 solo arranque con N llamadas.
+- Volver a sondear en vivo lo que ya esta en la cache: relanza 15-20 s (local) o red inutilmente para los mismos schemas; usa `--from-cache` y `--refresh` solo si necesitas datos frescos.
+- Imprimir catalogos de tools sin necesidad: `--list` de un servidor de 106 tools vuelca miles de tokens en el contexto; usa la salida compacta de `audit_mcp.py` o `--from-cache`, y `--verbose` solo cuando haga falta el detalle.
+- Sondear a mano con curl o PowerShell: PS 5.1 corrompe las comillas del JSON ("JSON invalido") y `Invoke-WebRequest` falla por TLS aunque curl funcione; `probe_mcp.py` encapsula ambos flujos.
+- Activar un MCP para responder "que tools tiene": era una pregunta informativa y pagas tools en cada mensaje mas reinicio de sesion; responde con `probe_mcp.py` sin tocar la config.
+- Activar un MCP para una sola llamada puntual: pagas las tools todo el resto de la sesion y un reinicio sin necesidad; usa `call_mcp.py <nombre> <tool> --args-file ...`, cero tokens de prompt y sin reiniciar.
+- Confiar ciegamente en el schema publicado: puede omitir parametros requeridos (leccion real: `send-email` no listaba `from` y el servidor lo exijo). Ante un error de validacion, sondea tools de solo lectura relacionadas (`list-domains`) para descubrir el valor valido y reintenta: el intento fallido por validacion no llega a la API, no hay duplicados.
+- Apagar un MCP en medio de una tarea (entre tool calls): la sesion puede depender de la conexion; apaga solo al entregar el resultado.
+- Apagar sin avisar o apagar un MCP permanente: el usuario puede esperar que siga disponible; reporta el cambio de estado en cada respuesta final y pregunta la preferencia una vez, y respetala.
+- Reformatear la config entera o mezclar flags: cambia el formato del archivo y puede romper secretos; usa solo el flag del bloque (`disabled` en anidado, `enabled` en plano, nunca ambos) o mejor `toggle_mcp.py`, que preserva estructura y secretos.
+- Copiar el valor de un secreto a la config, a un comando o a la conversacion: queda impreso en logs y prompts de forma permanente. Los tokens van en `{file:./.secrets/...}`, resueltos en runtime y **nunca impresos** — esto si es critico.
+- Descartar un servidor "porque no existe" al no aparecer en `opencode mcp list`: list solo muestra los definidos en la config; la config de proyecto puede anadir otros.
 
-## Problemas comunes
+## Referencias — cuando cargar cada una
 
-| Sintoma | Causa | Solucion |
-|---|---|---|
-| Cambié el flag y sigue conectado | Config no recargada | Reinicia la sesion/opencode; verifica con `opencode mcp list` |
-| Active un MCP a mitad de sesion y sus tools no aparecen | Las tools se inyectan en el prompt al **arrancar** la sesion | `opencode mcp list` dira `connected` pero no podras llamarlas: reinicia la sesion o abre una nueva. Si solo querias ver que tools hay, usa `probe_mcp.py` sin activar |
-| `JSON invalido` al sondear con curl desde PowerShell | PS 5.1 corrompe las comillas del payload al pasarlo a curl.exe | No sondees a mano: usa `python scripts/probe_mcp.py <nombre>` |
-| `Invoke-WebRequest` falla con error TLS pero curl funciona | El .NET viejo de PS 5.1 no negocia ese TLS | Usa curl o probe_mcp.py (urllib); no concluyas que el servidor esta caido |
-| El servidor no devuelve `Mcp-Session-Id` | Servidor stateless: no exige sesion | No es un error; probe_mcp.py reintenta tools/list sin la cabecera si hiciera falta |
-| `failed: Connection closed` | Comando local roto o falta dependencia | Revisa el `command` del servidor; prueba el comando a mano |
-| MCP no aparece en list | No esta en la config activa | Buscalo en opencode.json global y de proyecto; `opencode mcp add <nombre>` para crearlo |
-| El script dice "no existe" | Nombre mal escrito | Ejecuta `toggle_mcp.py status` que lista los existentes |
-| `call_mcp.py` devuelve error de validacion tipo "campo requerido undefined" aunque el schema no liste ese campo | Schema publicado incompleto por el servidor | Sondea tools de solo lectura relacionadas (p. ej. `list-domains` en resend) para descubrir los valores validos, anade el campo faltante al payload y reintenta; el intento fallido por validacion suele quedarse en el servidor y NO llega a la API (sin duplicados) |
-| `--args '{...}'` inline falla con "JSON no valido" | cmd/PowerShell corrompen las comillas del JSON | Pon los argumentos en un archivo UTF-8 y usa `--args-file payload.json` |
-| La primera llamada a un MCP local (`npx -y ...`) expira | `npx` descarga el paquete en el primer arranque | Sube `--timeout 90` (o mas) en probe_mcp.py, call_mcp.py y audit_mcp.py |
-| Cada llamada a un MCP local tarda 15-20 s y se repite | probe/call relanzan el proceso en cada ejecucion | Agrupa en `audit_mcp.py --batch` (1 arranque, N llamadas) o lee schemas con `--from-cache` |
+- El servidor responde algo inesperado a nivel de protocolo, o quieres entender el JSON-RPC (handshake remoto, stdio local, SSE, stateless, `tools/call`, resources/prompts, patron de sesion unica, porque no sondear a mano): lee `references/probe-jsonrpc.md`. No la leas para ejecutar un comando que ya funciono.
+- Vas a editar `opencode.json` a mano, o dudas de la sintaxis (anidado vs plano), el CLI `opencode mcp` o el whitelist de tools: lee `references/sintaxis-opencode-mcp.md`. No la leas para tareas que solo usan `opencode mcp list` o `toggle_mcp.py`.
+- Un sintoma sin respuesta aqui (tools que no aparecen a mitad de sesion, `JSON invalido`, timeout de `npx`, "campo requerido undefined", servidor ausente de list): lee `references/troubleshooting.md`, tabla sintoma → causa → solucion con comando.
