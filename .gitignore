@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Estado local de los scripts MCP: cache de schemas (.cache/<nombre>.json)
+.cache/
+
+# Secretos: NUNCA versionar valores reales
+.secrets/
+*.env
+.env*
+
+# SO / editores
+.DS_Store
+Thumbs.db
+*.log
