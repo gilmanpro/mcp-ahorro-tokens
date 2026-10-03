@@ -1,10 +1,21 @@
 # mcp-ahorro-tokens
 
+> [!TIP]
+> **Disponible en skills.sh** — ficha publica: [www.skills.sh/gilmanpro/mcp-ahorro-tokens/mcp-ahorro-tokens](https://www.skills.sh/gilmanpro/mcp-ahorro-tokens/mcp-ahorro-tokens) · pack: [www.skills.sh/p/uCeRomrVthNSsvAa](https://www.skills.sh/p/uCeRomrVthNSsvAa)
+>
+> Instalar con cualquiera de los dos comandos:
+>
+> ```bash
+> npx skills add gilmanpro/mcp-ahorro-tokens
+> npx skills add https://www.skills.sh/p/uCeRomrVthNSsvAa
+> ```
+
 Skill para [OpenCode](https://opencode.ai) que **activa y desactiva servidores MCP bajo demanda para ahorrar tokens de contexto**.
 
 Cada servidor MCP **conectado** inyecta los nombres, descripciones y schemas completos de sus tools en el prompt del agente **en cada mensaje**, aunque la conversación nunca las use: un servidor con 100+ tools cuesta decenas de miles de tokens por turno. Esta skill impone la disciplina opuesta: apagar todo al empezar, encender solo lo pedido, apagar al terminar y —siempre que se pueda— **usar un MCP sin encenderlo** (sondear sus tools, auditarlo o llamar una tool exacta por JSON-RPC directo, coste cero de prompt).
 
-[![skills.sh](https://skills.sh/b/gilmanpro/mcp-ahorro-tokens)](https://skills.sh/gilmanpro/mcp-ahorro-tokens)
+<!-- el badge se activa cuando skills.sh indexa la skill (hasta entonces puede mostrar "resource not found") -->
+[![skills.sh](https://skills.sh/b/gilmanpro/mcp-ahorro-tokens)](https://www.skills.sh/gilmanpro/mcp-ahorro-tokens/mcp-ahorro-tokens)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![OpenCode](https://img.shields.io/badge/OpenCode-compatible-blue)](https://opencode.ai)
 [![Python](https://img.shields.io/badge/Python-3.9+-yellow)](https://python.org)
@@ -26,8 +37,16 @@ Regla de oro: **inspeccionar sondeando, auditar en lote, accion puntual por tool
 
 ### a) Con el CLI de skills.sh (recomendado)
 
+Desde este repo:
+
 ```bash
 npx skills add gilmanpro/mcp-ahorro-tokens
+```
+
+O desde el pack publicado en skills.sh:
+
+```bash
+npx skills add https://www.skills.sh/p/uCeRomrVthNSsvAa
 ```
 
 El CLI descarga la skill de este repo y la **instala en la carpeta de skills de los agentes que detecta en tu maquina** (las deja disponibles para que cada agente las cargue segun su `description`). Utilidades:
@@ -35,7 +54,7 @@ El CLI descarga la skill de este repo y la **instala en la carpeta de skills de 
 - `-g` la instala a nivel de usuario (global, todas las sesiones) en lugar del proyecto actual.
 - `-a <agente>` elige el agente destino; `--copy` copia los archivos en vez de enlazarlos.
 - `-l` lista las skills disponibles del repo sin instalar nada; `--all -y` instala sin preguntas.
-- La **primera instalacion es la que indexa la ficha** en https://skills.sh/gilmanpro/mcp-ahorro-tokens (el indexado es asincrono: la pagina puede tardar en aparecer).
+- La **primera instalacion es la que indexa la ficha** en https://www.skills.sh/gilmanpro/mcp-ahorro-tokens/mcp-ahorro-tokens (el indexado es asincrono: la pagina puede tardar en aparecer).
 
 ### b) Copia manual (2 segundos)
 
