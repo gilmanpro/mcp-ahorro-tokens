@@ -17,6 +17,24 @@ audit_mcp.py hace 1 arranque y N operaciones dentro de la misma sesion:
   - --batch plan.json: plan = lista de {"tool": ..., "args": {...}} o
     {"tool": ..., "args_file": "ruta.json"} -> tabla de resultados
     (OK / ERROR con motivo corto), outputs truncados a --max-output lineas.
+  - --out <dir>: con --call/--batch vuelca la salida COMPLETA (JSON o texto,
+    sin truncar) de cada llamada en <dir>/<NN>_<tool>.json (NN = indice del
+    lote) y deja en stdout solo el estado, la preview corta y la RUTA del
+    archivo. Asi un lote de estatus NO obliga a re-llamar tool por tool con
+    call_mcp.py para leer el detalle. Sin --out el comportamiento es
+    exactamente el de siempre (retrocompatible). El dir se crea si falta;
+    usa rutas DENTRO de la skill (p. ej. .tmp/resultados).
+  - --max-output <lineas>: controla el detalle impreso en stdout por
+    resultado. Con N>0 (y --verbose) sigue siendo N lineas cortadas cada una
+    a ANCHO_LINEA (200) caracteres. Con 0 = SIN TRUNCADO en stdout: vuelca el
+    resultado completo (todas las lineas, ancho libre) sin necesidad de
+    --verbose. La preview de la tabla OK/ERROR se corta siempre a
+    ANCHO_PREVIEW (140) para mantener compacta la cabecera; para el detalle
+    usa --out (archivo) o --max-output 0 (stdout).
+  - --show-tools [--tool <nombre>]: catalogo de tools (o SOLO el inputSchema
+    de esa tool en JSON compacto) leido de .cache/<nombre>.json sin red, sin
+    re-sondear y sin exigir cache fresca; funciona con el servidor apagado y
+    no toca la config. Si no hay cache, error claro sugiriendo el sondeo.
   - Tras cada tools/list escribe la cache de schemas en
     .cache/<nombre>.json; con --from-cache responde desde ella sin arrancar el
     servidor (0 s, 0 red). --refresh refresca en vivo si falta o es vieja.
@@ -33,11 +51,13 @@ audit_mcp.py hace 1 arranque y N operaciones dentro de la misma sesion:
 
 Uso:
   python audit_mcp.py <nombre> [--config <ruta>] [--timeout <seg>]
-      [--verbose] [--max-output <lineas>] [--calls-only]
+      [--verbose] [--max-output <lineas>] [--calls-only] [--out <dir>]
       [--no-tools] [--no-resources] [--no-prompts]
       [--call <tool> [--args-file <json> | --args <json>]]  (repetible)
       [--batch plan.json]
       [--from-cache [--max-age <h>] [--refresh]]
+
+  python audit_mcp.py <nombre> --show-tools [--tool <nombre-tool>] [--verbose]
 
   python audit_mcp.py --all [--config <ruta>] [--timeout 120]
       [--verbose] [--no-resources] [--no-prompts]
@@ -55,7 +75,8 @@ una tool respondio isError:true, error JSON-RPC/red/proceso) o, con --all,
 algun servidor fallo (el lote continua y la tabla lo muestra); 2 = error de
 config/uso (config o servidor inexistente, plan ilegible, --from-cache con
 llamadas o sin cache valida y sin --refresh, --all con nombre o con
---call/--batch).
+--call/--batch, --show-tools sin cache o con --call/--batch/--all, --tool
+sin --show-tools, --out sin llamadas).
 
 Solo stdlib. Protocolo: references/probe-jsonrpc.md
 """
@@ -63,6 +84,7 @@ Solo stdlib. Protocolo: references/probe-jsonrpc.md
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -75,6 +97,7 @@ from mcp_common import (  # noqa: E402
     load_config,
     load_server_or_die,
     print_tools,
+    cache_path,
     read_cache,
     server_kind,
     server_target,
@@ -82,8 +105,8 @@ from mcp_common import (  # noqa: E402
     McpSession,
 )
 
-ANCHO_LINEA = 200    # truncado por linea de resultado (ahorro de contexto)
-ANCHO_PREVIEW = 140  # preview de una linea en la tabla
+ANCHO_LINEA = 200    # truncado POR LINEA de resultado en --verbose (0 = sin corte)
+ANCHO_PREVIEW = 140  # preview de una linea en la tabla OK/ERROR (siempre corta)
 
 
 def salir_utf8():
@@ -113,7 +136,27 @@ def parse_args(argv=None):
     parser.add_argument("--verbose", action="store_true",
                         help="Detalle: descripciones de tools y hasta --max-output lineas por resultado")
     parser.add_argument("--max-output", type=int, default=6, metavar="LINEAS", dest="max_output",
-                        help="Maximo de lineas impresas por resultado de tool en --verbose (defecto 6)")
+                        help=f"Detalle impreso en stdout por resultado: maximo de lineas "
+                             f"(cada linea cortada a {ANCHO_LINEA} caracteres) y visible con "
+                             f"--verbose; con 0 se vuelca el resultado COMPLETO en stdout "
+                             f"(sin corte de lineas ni de ancho) sin necesidad de --verbose. "
+                             f"Defecto 6. La preview de la tabla OK/ERROR se corta siempre a "
+                             f"{ANCHO_PREVIEW} caracteres: para todo el detalle usa --out.")
+    parser.add_argument("--out", default=None, metavar="DIR", dest="out_dir",
+                        help="Con --call/--batch: vuelca la salida COMPLETA (sin truncar) de "
+                             "cada llamada en DIR\\<NN>_<tool>.json e imprime en stdout solo "
+                             "estado, preview y la ruta. El DIR se crea si falta; usa rutas "
+                             "dentro de la skill (p. ej. .tmp\\resultados). Sin --out, "
+                             "comportamiento identico al anterior.")
+    parser.add_argument("--show-tools", action="store_true", dest="show_tools",
+                        help="Imprimir el catalogo de tools desde .cache\\<server>.json sin red "
+                             "y sin re-sondear (funciona con el servidor apagado; no exige "
+                             "cache fresca). Con --tool <nombre> muestra solo su inputSchema "
+                             "en JSON compacto. Incompatible con --call/--batch/--all/"
+                             "--from-cache. Si no hay cache, sale con 2 sugiriendo el sondeo.")
+    parser.add_argument("--tool", default=None, metavar="NOMBRE", dest="tool_name",
+                        help="Con --show-tools: imprimir solo el inputSchema de esa tool "
+                             "(JSON compacto, desde la cache)")
     parser.add_argument("--call", action="append", default=[], metavar="TOOL", dest="calls",
                         help="Tool a invocar; repetible. Va acompanada de su --args-file/--args por orden")
     parser.add_argument("--args-file", action="append", default=[], metavar="RUTA", dest="args_files",
@@ -222,7 +265,13 @@ def extract_text(result):
 
 
 def render_output(text, max_lines):
-    """Trunca el output a max_lines lineas y ANCHO_LINEA caracteres por linea."""
+    """Trunca el output a max_lines lineas y ANCHO_LINEA caracteres por linea.
+
+    max_lines == 0 => SIN TRUNCADO: se devuelve el texto completo (todas las
+    lineas, ancho libre). Es la semantica de --max-output 0.
+    """
+    if max_lines == 0:
+        return text
     lineas = text.splitlines() or [""]
     cortadas = [(l[:ANCHO_LINEA] + ("..." if len(l) > ANCHO_LINEA else ""))
                 for l in lineas[:max_lines]]
@@ -232,11 +281,53 @@ def render_output(text, max_lines):
     return "\n".join(cortadas)
 
 
+def sanitize_nombre(name):
+    """Nombre de tool convertido a componente seguro de archivo."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name) or "tool"
+
+
+def save_call_output(out_dir, idx, tool_name, result):
+    """Vuelca la salida COMPLETA (sin truncar) de una llamada en el lote.
+
+    Escribe <out_dir>/<NN>_<tool>.json con el texto de la tool (formateado
+    como JSON si el texto es JSON valido; raw si es texto plano) o, si no hay
+    texto, el structuredContent / result completo. Sirve tambien para
+    resultados isError (el texto del error se guarda integro). Devuelve la
+    ruta escrita o None si fallo (se avisa en stdout pero no rompe el lote).
+    """
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        texto = extract_text(result)
+        if texto.strip():
+            try:
+                contenido = json.dumps(json.loads(texto), indent=2, ensure_ascii=False)
+            except json.JSONDecodeError:
+                contenido = texto
+        elif result.get("structuredContent") is not None:
+            contenido = json.dumps(result["structuredContent"], indent=2, ensure_ascii=False)
+        else:
+            contenido = json.dumps(result, indent=2, ensure_ascii=False)
+        ruta = os.path.join(out_dir, f"{idx:02d}_{sanitize_nombre(tool_name)}.json")
+        with open(ruta, "w", encoding="utf-8") as fh:
+            fh.write(contenido)
+            if not contenido.endswith("\n"):
+                fh.write("\n")
+        return ruta
+    except OSError:
+        return None
+
+
 def run_calls(server_name, session, calls, tools, ns, any_fail):
-    """Ejecuta las llamadas en orden dentro de la MISMA sesion y pinta la tabla."""
+    """Ejecuta las llamadas en orden dentro de la MISMA sesion y pinta la tabla.
+
+    Con --out: cada resultado (OK o isError) se ademas vuelca COMPLETO a
+    <out>/<NN>_<tool>.json y stdout solo muestra estado + preview + ruta.
+    Con --max-output 0 (o --verbose) se imprime el detalle por consola.
+    """
     nombres = [t.get("name") for t in tools]
+    out_dir = ns.out_dir
     print("CALLS:")
-    for name, args in calls:
+    for idx, (name, args) in enumerate(calls, 1):
         if name not in nombres:
             print(f"ERROR  {name} — tool inexistente en '{server_name}' "
                   f"({len(nombres)} tools disponibles)")
@@ -251,12 +342,21 @@ def run_calls(server_name, session, calls, tools, ns, any_fail):
         if result.get("isError"):
             motivo = extract_text(result).strip().replace("\n", " ")[:ANCHO_PREVIEW] or "isError sin detalle"
             print(f"ERROR  {name} — isError: {motivo}")
+            if out_dir:
+                ruta = save_call_output(out_dir, idx, name, result)
+                print(f"       {'salida completa: ' + ruta if ruta else 'AVISO: no se pudo escribir la salida en ' + out_dir}")
             any_fail[0] = True
             continue
         texto = extract_text(result)
         preview = texto.strip().replace("\n", " ")[:ANCHO_PREVIEW]
         print(f"OK     {name} — {preview or '(sin contenido)'}")
-        if ns.verbose:
+        if out_dir:
+            ruta = save_call_output(out_dir, idx, name, result)
+            if ruta:
+                print(f"       salida completa: {ruta}")
+            else:
+                print(f"       AVISO: no se pudo escribir la salida en {out_dir}")
+        if ns.verbose or ns.max_output == 0:
             for linea in render_output(texto, ns.max_output).splitlines():
                 print(f"       {linea}")
 
@@ -337,6 +437,61 @@ def show_from_cache(name, verbose, data):
         else:
             nombres = ", ".join((v.get("name") or v.get("uri") or v.get("title", "?")) for v in valor)
             print(f"{etiqueta} {len(valor)} — {nombres or '(ninguno)'}")
+
+
+def edad_texto(seg):
+    """Edad legible en segundos -> 'X min' o 'X.X h'."""
+    if seg < 3600:
+        return f"{seg / 60:.0f} min"
+    return f"{seg / 3600:.1f} h"
+
+
+def show_tools_from_cache(name, tool_name, verbose):
+    """Catalogo de tools (o inputSchema de una tool) desde .cache/<name>.json.
+
+    SIN red, SIN re-sondear y SIN exigir cache fresca (a diferencia de
+    --from-cache): lee el ultimo snapshot del disco y funciona con el
+    servidor apagado. --tool <nombre> imprime solo su inputSchema en JSON
+    compacto (una linea). Sin cache: error claro sugiriendo el sondeo.
+    """
+    path = cache_path(name)
+    if not os.path.isfile(path):
+        print(f"ERROR: no hay cache para '{name}' ({path}).", file=sys.stderr)
+        print(f"Sondéala una vez en vivo para escribirla: python scripts\\probe_mcp.py {name} "
+              f"(o python scripts\\audit_mcp.py {name} --timeout 120; para auto-refrescarla "
+              f"sin opencode: python scripts\\refrescar_cache.py --solo {name})",
+              file=sys.stderr)
+        return 2
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as err:
+        print(f"ERROR: cache ilegible ({path}): {err}", file=sys.stderr)
+        return 2
+    tools = data.get("tools") or []
+    edad = edad_texto(time.time() - float(data.get("timestamp", 0)))
+    print(f"[cache] '{name}' — {len(tools)} tools en {path} "
+          f"(snapshot hace {edad}; servidor NO consultado, sin re-sondeo)")
+    if tool_name:
+        for t in tools:
+            if t.get("name") == tool_name:
+                schema = t.get("inputSchema")
+                if schema is None:
+                    print(f"(la tool '{tool_name}' no declara inputSchema en la cache)")
+                else:
+                    print(json.dumps(schema, ensure_ascii=False))
+                return 0
+        restantes = ", ".join(t.get("name", "?") for t in tools)
+        print(f"ERROR: la tool '{tool_name}' no esta en la cache de '{name}' "
+              f"({len(tools)} tools). Existentes: {restantes[:ANCHO_PREVIEW]}...",
+              file=sys.stderr)
+        return 2
+    if verbose:
+        print_tools(tools)
+    else:
+        nombres = ", ".join(t.get("name", "?") for t in tools)
+        print(f"TOOLS    {len(tools)} — {nombres or '(ninguna)'}")
+    return 0
 
 
 # ----------------------------------------------------------------- --all ----
@@ -456,6 +611,38 @@ def main(argv=None):
     salir_utf8()
     ns = parse_args(argv)
 
+    if ns.show_tools:
+        if ns.all_servers:
+            print("ERROR: --show-tools no aplica a --all (la cache es por servidor).",
+                  file=sys.stderr)
+            return 2
+        if ns.from_cache:
+            print("ERROR: --show-tools y --from-cache son alternativas; elige una. "
+                  "--show-tools lee la cache sin exigir frescura y con --tool "
+                  "imprime el inputSchema.", file=sys.stderr)
+            return 2
+        if ns.calls or ns.args_files or ns.args_inline or ns.batch is not None:
+            print("ERROR: --show-tools es de inspeccion: incompatible con "
+                  "--call/--args/--args-file/--batch.", file=sys.stderr)
+            return 2
+        if not ns.server:
+            print("ERROR: --show-tools necesita el servidor: "
+                  "audit_mcp.py <servidor> --show-tools [--tool <nombre>]",
+                  file=sys.stderr)
+            return 2
+        return show_tools_from_cache(ns.server, ns.tool_name, ns.verbose)
+
+    if ns.tool_name and not ns.show_tools:
+        print("ERROR: --tool solo aplica junto a --show-tools (inputSchema desde "
+              "la cache). Para INVOCAR una tool usa --call, --batch o call_mcp.py.",
+              file=sys.stderr)
+        return 2
+
+    if ns.out_dir and ns.from_cache:
+        print("ERROR: --out vuelca resultados de LLAMADAS; con --from-cache (solo "
+              "inspeccion) no hay nada que volcar.", file=sys.stderr)
+        return 2
+
     if ns.all_servers:
         if ns.server:
             print("ERROR: --all no acepta nombre de servidor; audita TODOS "
@@ -490,6 +677,11 @@ def main(argv=None):
     calls, err = build_calls(ns)
     if err:
         print(f"ERROR: {err}", file=sys.stderr)
+        return 2
+
+    if ns.out_dir and not calls:
+        print("ERROR: --out solo tiene sentido con --call o --batch (no hay "
+              "llamadas que volcar).", file=sys.stderr)
         return 2
 
     server, config_dir = load_server_or_die(ns.server, ns.config)

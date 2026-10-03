@@ -13,7 +13,7 @@ Uso:
   python toggle_mcp.py on  <nombre> [--config <ruta>]
   python toggle_mcp.py off <nombre> [--config <ruta>]
   python toggle_mcp.py off --all [--except n1,n2] [--no-verify] [--bg]
-                             [--config <ruta>]
+                             [--log <ruta>] [--config <ruta>]
   python toggle_mcp.py verify [--except n1,n2] [--bg-log [ruta]]
                              [--config <ruta>]
   python toggle_mcp.py status [--config <ruta>]
@@ -33,14 +33,18 @@ tras reintentar". Al exito imprime "VERIFICADO: N servidores apagados".
 Modo segundo plano (--bg): 'off --all --bg' relanza el propio script DETACHED
 (Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP) con --verify forzado y
 retorna INMEDIATAMENTE (exit 0). El hijo escribe su salida en
-%TEMP%\mcp-off-all.log (sobrescrito en cada ejecucion; cabecera con timestamp,
-resumen por servidor y linea final VERIFICADO/FALLO). El hijo recibe la ruta
-del log via la variable de entorno MCP_OFF_ALL_LOG.
+<skill>\.tmp\mcp-off-all.log (regla del repo: los temporales SIEMPRE dentro
+del proyecto, nunca en %TEMP%; la carpeta .tmp se crea si falta; el log se
+sobrescribe en cada ejecucion: cabecera con timestamp, resumen por servidor y
+linea final VERIFICADO/FALLO). El hijo recibe la ruta del log via la variable
+de entorno MCP_OFF_ALL_LOG. --log <ruta> permite una ruta alternativa explicita
+(para quien necesite otro sitio).
 
 'verify': lectura pura del JSON (instantaneo, sin red) que imprime una linea
 por servidor ("X: apagado" / "X: ENCENDIDO") + resumen. Exit 0 si todos
 apagados, 1 si alguno encendido, 2 error de config/uso. Con --bg-log muestra
-la ultima linea del log del ultimo off --all en segundo plano como evidencia.
+la ultima linea del log del ultimo off --all en segundo plano como evidencia
+(defecto: <skill>\.tmp\mcp-off-all.log; admite ruta explicita).
 
 Exit codes globales: 0 OK, 1 verificacion fallida, 2 error de uso/config.
 
@@ -54,7 +58,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -66,11 +69,23 @@ from mcp_common import (  # noqa: E402
 )
 
 BG_LOG_NAME = "mcp-off-all.log"
+SKILL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def bg_log_path():
-    """Ruta del log del off --all en segundo plano (%TEMP%\\mcp-off-all.log)."""
-    return os.path.join(tempfile.gettempdir(), BG_LOG_NAME)
+    """Ruta del log del off --all en segundo plano (<skill>\\.tmp\\mcp-off-all.log).
+
+    Regla del repo: los temporales van SIEMPRE dentro del proyecto (antes vive
+    en %TEMP%, fuera del arbol). Crea .tmp\\ si falta. El padre la usa para
+    informar y pasar la ruta al hijo; el hijo escribe donde diga
+    MCP_OFF_ALL_LOG (que puede ser una --log explicita).
+    """
+    d = os.path.join(SKILL_ROOT, ".tmp")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return os.path.join(d, BG_LOG_NAME)
 
 
 def write_config(path, cfg) -> None:
@@ -140,12 +155,17 @@ def run() -> int:
     parser.add_argument("--bg", action="store_true",
                         help="con 'off --all': relanzarse en segundo plano "
                              "(detached) y retornar de inmediato; el hijo "
-                             "escribe en %%TEMP%%\\mcp-off-all.log")
+                             "escribe en <skill>\\.tmp\\mcp-off-all.log "
+                             "(o en la ruta de --log)")
+    parser.add_argument("--log", default=None, metavar="RUTA",
+                        help="con 'off --all --bg': ruta alternativa del log del "
+                             "proceso en segundo plano (defecto: "
+                             "<skill>\\.tmp\\mcp-off-all.log)")
     parser.add_argument("--bg-log", dest="bg_log", nargs="?", const=bg_log_path(),
                         metavar="RUTA",
                         help="con 'verify': mostrar la ultima linea del log del "
                              "off --all en segundo plano (defecto: "
-                             "%%TEMP%%\\mcp-off-all.log)")
+                             "<skill>\\.tmp\\mcp-off-all.log)")
     parser.add_argument("--config", default=default_config_path(),
                         help="Ruta a opencode.json (por defecto: global de OpenCode)")
     args = parser.parse_args()
@@ -161,13 +181,24 @@ def run() -> int:
     if args.bg and not (args.action == "off" and args.all):
         print("ERROR: --bg solo aplica a 'off --all'.", file=sys.stderr)
         return 2
+    if args.log and not args.bg:
+        print("ERROR: --log solo aplica a 'off --all --bg' (ruta del log del "
+              "proceso en segundo plano).", file=sys.stderr)
+        return 2
     if args.bg_log is not None and args.action != "verify":
         print("ERROR: --bg-log solo aplica a 'verify'.", file=sys.stderr)
         return 2
 
     # -- Modo segundo plano: relanzarse detached y salir YA (exit 0) ----------
     if args.bg:
-        log = bg_log_path()
+        log = args.log or bg_log_path()
+        log_dir = os.path.dirname(os.path.abspath(log))
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except OSError as err:
+            print(f"ERROR: no se pudo crear la carpeta del log ({log_dir}): {err}",
+                  file=sys.stderr)
+            return 2
         cmd = [sys.executable, os.path.abspath(__file__), "off", "--all",
                "--verify", "--config", os.path.abspath(args.config)]
         if args.except_names:

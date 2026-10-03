@@ -1,3 +1,9 @@
 # Estado local de los scripts MCP: caché de schemas (.cache/<nombre>.json)
 .cache/
 __pycache__/
+*.pyc
+# Residuos de trabajo de la skill (logs, planes, resultados de lote --out)
+.tmp/
+# Entornos y secretos locales: NUNCA deben versionarse
+.env
+.venv/
