@@ -1,6 +1,6 @@
 ---
 name: mcp-ahorro-tokens
-description: "Activa y desactiva servidores MCP de OpenCode bajo demanda para ahorrar tokens: un MCP conectado inyecta los schemas de sus tools en cada mensaje aunque no se usen. Al cargar la skill, off --all los apaga todos (--except protege los permanentes); enciende solo lo pedido y apaga al terminar avisando. Inspeccionar sin activar: probe_mcp.py (schemas ya sondeados: --from-cache, 0 s sin red); accion puntual sin activar ni reiniciar: tools/call de call_mcp.py; auditar, probar todas las tools o llamar en lote en una sola sesion: audit_mcp.py (--all recorre todo el inventario). Usar SIEMPRE que el usuario pida activar, apagar, conectar o usar un MCP, apagarlos todos, pregunte que tools tiene o cuanto cuesta tenerlo conectado, quiera auditar o probar todas sus tools, hacer varias llamadas o un lote, leer schemas de la cache o ahorrar tokens, y al terminar cualquier tarea que uso un MCP para desactivarlo, aunque no mencione la skill. NO usar para crear un servidor MCP (usa mcp-builder)."
+description: "Activa y desactiva servidores MCP de OpenCode bajo demanda para ahorrar tokens: un MCP conectado inyecta los schemas de sus tools en cada mensaje aunque no se usen. Al cargar la skill, off --all en segundo plano (--bg) los apaga todos (--except protege los permanentes); enciende solo lo pedido y apaga al terminar avisando. Inspeccionar sin activar: probe_mcp.py (schemas ya sondeados: --from-cache, 0 s sin red); accion puntual sin activar ni reiniciar: tools/call de call_mcp.py; auditar, probar todas las tools o llamar en lote en una sola sesion: audit_mcp.py (--all recorre todo el inventario). Usar SIEMPRE que el usuario pida activar, apagar, conectar o usar un MCP, apagarlos todos, pregunte que tools tiene o cuanto cuesta tenerlo conectado, quiera auditar o probar todas sus tools, hacer varias llamadas o un lote, leer schemas de la cache o ahorrar tokens, y al terminar cualquier tarea que uso un MCP para desactivarlo, aunque no mencione la skill. NO usar para crear un servidor MCP (usa mcp-builder)."
 license: MIT
 compatibility: opencode
 metadata:
@@ -16,13 +16,15 @@ Todos los comandos suponen cwd la carpeta de esta skill (`~\.agents\skills\mcp-a
 
 ## Accion al iniciar la skill
 
-Lo primero al cargar esta skill, antes de cualquier otra decision, es apagar todos los MCPs para que la sesion arranque a coste cero:
+Lo primero al cargar esta skill, antes de cualquier otra decision, es apagar todos los MCPs para que la sesion arranque a coste cero — **en segundo plano, sin bloquear el flujo**:
 
 ```bat
-python scripts\toggle_mcp.py off --all
+python scripts\toggle_mcp.py off --all --bg
 ```
 
-Es idempotente (los ya apagados se reportan pero no se tocan) e imprime un resumen por servidor. Informa al usuario en una linea ("Se han apagado los MCPs X/Y al iniciar para ahorrar tokens; dime si quieres dejar alguno permanente"). Si ya indico MCPs permanentes: `python scripts\toggle_mcp.py off --all --except nombre1,nombre2`.
+Retorna de inmediato (exit 0): el script se relanza detached, se auto-verifica releyendo la config desde disco con un reintento de escritura, y deja el resultado en `%TEMP%\mcp-off-all.log` (resumen por servidor y linea final VERIFICADO/FALLO). Es idempotente (los ya apagados se reportan pero no se tocan). Informa al usuario en una linea ("Se han apagado los MCPs al iniciar para ahorrar tokens; dime si quieres dejar alguno permanente"). Si ya indico MCPs permanentes: `off --all --bg --except nombre1,nombre2`.
+
+Si la tarea posterior necesita certeza inmediata (no confiar en el bg): `python scripts\toggle_mcp.py verify` — lectura instantanea del JSON, una linea por servidor y exit 0 = todos apagados (1 = alguno ENCENDIDO; `--bg-log` adjunta la ultima linea del log como evidencia). `off --all` a secas también vale (verifica integrado; `--no-verify` lo omite).
 
 ## Arbol de decision — una herramienta por necesidad
 
@@ -112,15 +114,17 @@ Plan `plan.json` (lista de llamadas; `args` inline o `args_file` relativo al pla
 python scripts\toggle_mcp.py status
 python scripts\toggle_mcp.py on <nombre>
 python scripts\toggle_mcp.py off <nombre>
+python scripts\toggle_mcp.py off --all [--except n1,n2] [--bg] [--no-verify]
+python scripts\toggle_mcp.py verify [--except n1,n2] [--bg-log]
 ```
 
-Por defecto opera sobre `~/.config/opencode/opencode.json` (`--config` para otro archivo) y luego verifica con `opencode mcp list`. El binario acepta dos formatos de config: anidado (`mcp.servers.<nombre>` + `disabled`) y plano oficial (`mcp.<nombre>` + `enabled`). Lee `references/sintaxis-opencode-mcp.md` ANTES de editar la config a mano.
+`off --all` verifica por defecto (relee el JSON escrito, reintenta una vez, imprime VERIFICADO o sale con 1); `--bg` hace eso mismo detached escribiendo en `%TEMP%\mcp-off-all.log` y retorna al instante; `verify` confirma el estado leyendo solo (exit 0/1/2). Por defecto opera sobre `~/.config/opencode/opencode.json` (`--config` para otro archivo) y luego verifica con `opencode mcp list`. El binario acepta dos formatos de config: anidado (`mcp.servers.<nombre>` + `disabled`) y plano oficial (`mcp.<nombre>` + `enabled`). Lee `references/sintaxis-opencode-mcp.md` ANTES de editar la config a mano.
 
 Alternativa intermedia para un servidor con muchas tools que quieres conectado sin pagarlas en el prompt: oculta todas con el patron `"<servidor>_*": false` en `"tools"` de opencode.json y whitelistea solo las 2-3 que usas (ejemplo JSON en la referencia). Orden de preferencia: apagar (ni se conecta) → accion puntual `call_mcp.py` → uso repetido de 2-3 tools (whitelist) → uso intensivo de muchas tools (activar el servidor entero).
 
 ## Anti-patrones
 
-- Empezar una tarea con MCPs encendidos que nadie pidio: cada mensaje posterior paga sus tools; `off --all` al cargar la skill garantiza coste cero y `--except` protege los permanentes.
+- Empezar una tarea con MCPs encendidos que nadie pidio: cada mensaje posterior paga sus tools; `off --all --bg` al cargar la skill garantiza coste cero sin bloquear el flujo (el script se auto-verifica) y `--except` protege los permanentes.
 - Encadenar varios `call_mcp.py` contra un MCP local `npx`: cada ejecucion relanza el servidor y paga ~15-20 s por llamada; `audit_mcp.py --batch plan.json` (o `--call` repetido) hace 1 solo arranque con N llamadas.
 - Volver a sondear en vivo lo que ya esta en la cache: relanza 15-20 s (local) o red inutilmente para los mismos schemas; usa `--from-cache` y `--refresh` solo si necesitas datos frescos.
 - Imprimir catalogos de tools sin necesidad: `--list` de un servidor de 106 tools vuelca miles de tokens en el contexto; usa la salida compacta de `audit_mcp.py` o `--from-cache`, y `--verbose` solo cuando haga falta el detalle.
