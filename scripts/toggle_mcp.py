@@ -31,8 +31,9 @@ reintenta la escritura UNA vez; si sigue mal, exit 1 con "X no quedo apagado
 tras reintentar". Al exito imprime "VERIFICADO: N servidores apagados".
 
 Modo segundo plano (--bg): 'off --all --bg' relanza el propio script DETACHED
-(Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP) con --verify forzado y
-retorna INMEDIATAMENTE (exit 0). El hijo escribe su salida en
+(Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW via
+el helper popenv de mcp_common: cero ventana visible garantizada) con
+--verify forzado y retorna INMEDIATAMENTE (exit 0). El hijo escribe su salida en
 <skill>\.tmp\mcp-off-all.log (regla del repo: los temporales SIEMPRE dentro
 del proyecto, nunca en %TEMP%; la carpeta .tmp se crea si falta; el log se
 sobrescribe en cada ejecucion: cabecera con timestamp, resumen por servidor y
@@ -66,6 +67,7 @@ from mcp_common import (  # noqa: E402
     find_server,
     list_servers,
     load_config,
+    popenv,
 )
 
 BG_LOG_NAME = "mcp-off-all.log"
@@ -203,16 +205,20 @@ def run() -> int:
                "--verify", "--config", os.path.abspath(args.config)]
         if args.except_names:
             cmd += ["--except", args.except_names]
-        creationflags = 0
+        # popenv anade CREATE_NO_WINDOW SIEMPRE (cero ventana garantizada);
+        # DETACHED_PROCESS por si solo no la excluye en todos los casos
+        # (Windows Terminal puede mediar la consola del hijo).
+        extra_flags = 0
         if os.name == "nt":
-            creationflags = (subprocess.DETACHED_PROCESS
-                             | subprocess.CREATE_NEW_PROCESS_GROUP)
+            extra_flags = (subprocess.DETACHED_PROCESS
+                           | subprocess.CREATE_NEW_PROCESS_GROUP)
         env = dict(os.environ, MCP_OFF_ALL_LOG=log)
         try:
-            subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL,
-                             creationflags=creationflags, env=env)
+            popenv(cmd, extra_flags=extra_flags,
+                   stdin=subprocess.DEVNULL,
+                   stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL,
+                   env=env)
         except OSError as err:
             print(f"ERROR: no se pudo lanzar el proceso en segundo plano: {err}",
                   file=sys.stderr)

@@ -38,10 +38,18 @@ Comportamiento:
     (scheme://***@host) — tambien dentro de los mensajes de error de red que
     las contengan — y las cabeceras/variables {file:...} resueltas no se
     imprimen jamas.
+  - CERO VENTANAS visibles: todos los spawns de servidores locales stdio
+    pasan por mcp_common.popenv() (CREATE_NO_WINDOW + STARTUPINFO SW_HIDE en
+    Windows). Fix de la "tormenta de terminales" al iniciar opencode con el
+    auto-refresco del plugin (padre pythonw = sin consola heredada).
+  - --sin-locales (alias --solo-remotos, o env MCP_REFRESH_STDIO=0): sondea
+    SOLO servidores type=remote/URL => CERO spawns de procesos (npx/node/cmd),
+    ni siquiera consolas invisibles.
 
 Uso:
   python refrescar_cache.py [--config <ruta>] [--timeout 60]
   python refrescar_cache.py --solo wsl-port context7
+  python refrescar_cache.py --sin-locales        (solo remotos: cero spawns)
   python refrescar_cache.py --verificar   (sin red: edad/herramientas por cache local)
 
 Exit codes: 0 = al menos un servidor refrescado; 1 = error de config/uso
@@ -209,7 +217,17 @@ def main(argv=None):
     parser.add_argument("--verificar", action="store_true", dest="verificar",
                         help="No tocar la red: mostrar el estado de la cache local "
                              "(edad y n° de tools por servidor)")
+    parser.add_argument("--sin-locales", "--solo-remotos", dest="solo_remotos",
+                        action="store_true",
+                        help="Sondear SOLO servidores remotos (type=remote/URL): "
+                             "cero spawns de procesos locales (npx/node/cmd) y por "
+                             "tanto cero ventanas posibles incluso sin el fix de "
+                             "CREATE_NO_WINDOW. Se activa igual con la variable de "
+                             "entorno MCP_REFRESH_STDIO=0 (o false/no/off).")
     ns = parser.parse_args(argv)
+
+    if os.environ.get("MCP_REFRESH_STDIO", "").strip().lower() in ("0", "false", "no", "off"):
+        ns.solo_remotos = True
 
     if not os.path.isfile(ns.config):
         print(f"ERROR: no existe la config: {ns.config}", file=sys.stderr)
@@ -234,14 +252,35 @@ def main(argv=None):
         print(f"AVISO: '{n}' de --solo no existe en la config, se ignora.",
               file=sys.stderr)
     seleccion = [n for n in seleccion if n in infos]
+
+    nota_solo_remotos = None
+    if ns.solo_remotos:
+        remotos, omitidos = [], []
+        for n in seleccion:
+            data = find_server(cfg, n)[0]
+            (remotos if server_kind(data) == "remote" else omitidos).append(n)
+        seleccion = remotos
+        if omitidos:
+            nota_solo_remotos = (f"[refresco] MODO SOLO-REMOTOS: {len(omitidos)} "
+                                 f"local(es) NO sondeado(s) (cero spawns): "
+                                 f"{', '.join(sorted(omitidos))}")
+            print(nota_solo_remotos)
+        if not seleccion:
+            print("ERROR: --sin-locales activo y no hay servidores remotos en la "
+                  "config (o ninguno sobrevivio a la seleccion).", file=sys.stderr)
+            return 1
+
     if not seleccion:
         print("ERROR: ningun servidor seleccionado para refrescar.", file=sys.stderr)
         return 1
 
     config_dir = os.path.dirname(os.path.abspath(ns.config))
+    modo = " [solo-remotos: cero spawns locales]" if ns.solo_remotos else ""
     print(f"[refresco] {len(seleccion)} servidor(es), timeout {ns.timeout}s por "
-          f"servidor, sin opencode y sin tocar la config...")
+          f"servidor, sin opencode y sin tocar la config...{modo}")
     lineas = []
+    if nota_solo_remotos:
+        lineas.append(nota_solo_remotos)
     ok_n = 0
     t_total = time.time()
     for name in seleccion:

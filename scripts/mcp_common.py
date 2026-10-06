@@ -42,6 +42,48 @@ CLIENT_INFO = {"name": "mcp_ahorro_tokens", "version": "2.0"}
 FILE_REF = re.compile(r"\{file:([^}]+)\}")
 
 
+# ------------------------------------------------- spawns sin ventana (Win) -
+
+def no_window_kwargs(extra_flags=0):
+    """kwargs de subprocess.Popen que garantizan CERO ventana visible.
+
+    En Windows OR-ear `extra_flags` con CREATE_NO_WINDOW (la consola del hijo
+    nace SIN ventana: ni conhost grafico ni pestana/popup de Windows Terminal
+    — el defecto sin este flag es que cada hijo de consola creado desde un
+    padre sin consola, p. ej. pythonw, abre UNA VENTANA visible) y anade un
+    STARTUPINFO con SW_HIDE+STARTF_USESHOWWINDOW como segundo cinturon (hijos
+    que crean su propia ventana). En POSIX devuelve {} (no existen las consolas
+    con ventana).
+
+    Hallazgo (fix 05/10/2026, tormenta de terminales al iniciar opencode): el
+    auto-refresco del plugin corre con pythonw.exe y cada servidor MCP local
+    stdio (npx/node/cmd) se lanzaba sin estos flags => N ventanas visibles por
+    arranque de sesion.
+
+    extra_flags: flags adicionales propios del caller (p. ej. en toggle_mcp.py
+    --bg: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP).
+    """
+    if os.name != "nt":
+        return {"creationflags": extra_flags} if extra_flags else {}
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = subprocess.SW_HIDE
+    return {
+        "startupinfo": si,
+        "creationflags": extra_flags | subprocess.CREATE_NO_WINDOW,
+    }
+
+
+def popenv(args, extra_flags=0, **kwargs):
+    """subprocess.Popen con cero ventana visible en Windows.
+
+    Acepta los mismos kwargs que subprocess.Popen salvo creationflags y
+    startupinfo (los gestiona aqui; para anadir flags propios usa extra_flags).
+    """
+    kwargs.update(no_window_kwargs(extra_flags))
+    return subprocess.Popen(args, **kwargs)
+
+
 class McpError(Exception):
     """Fallo de protocolo/sondeo/llamada con mensaje claro y SIN secretos.
 
@@ -448,11 +490,14 @@ class McpSession:
             env[key] = resolve_refs(val, self.config_dir)
 
         try:
-            self._proc = subprocess.Popen([exe] + cmd[1:],
-                                          stdin=subprocess.PIPE,
-                                          stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE,
-                                          env=env)
+            # popenv = CREATE_NO_WINDOW + SW_HIDE en Windows (fix tormenta de
+            # terminales: antes cada servidor stdio abierto desde pythonw
+            # mostraba una ventana de consola visible por arranque de sesion).
+            self._proc = popenv([exe] + cmd[1:],
+                                stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                env=env)
         except OSError as err:
             raise McpError(f"No se pudo lanzar '{' '.join(cmd)}': {err}")
 
